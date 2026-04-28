@@ -4,6 +4,8 @@ CUDA-accelerated real-time EEG preprocessing for the NVIDIA Jetson Orin Nano.
 
 8 channels, 250 Hz, 256-sample windows. Bandpass → notch → CAR → Welch PSD, all on the iGPU. Output is per-channel, per-band power: 6 floats × 8 channels = 48 features per window.
 
+This was originally built as the preprocessing layer for Mindset Technologies, it's now open-source for community BCI enthusiasts to use and test with.
+
 ## Why
 
 MNE-Python and BrainFlow run their filters on the CPU. On a Jetson that means losing half the wall budget to NumPy before the model ever sees a sample. For closed-loop BCI, neurofeedback, or SSVEP work — anything where a window arrives and a decision has to be ready before the next one — the bandpass and PSD have to run on the GPU.
