@@ -46,3 +46,20 @@ target_compile_options(cuda_eeg_prep PRIVATE
 if(EEG_NOTCH_HZ)
     target_compile_definitions(cuda_eeg_prep PRIVATE NOTCH_FREQ_HZ=${EEG_NOTCH_HZ})
 endif()
+
+# Occupancy reporter — standalone CLI, links the same kernels.
+add_executable(eeg_occupancy
+    benchmarks/occupancy.cu
+    ${EEG_SOURCES}
+)
+target_include_directories(eeg_occupancy PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(eeg_occupancy PRIVATE CUDA::cudart CUDA::cufft)
+target_compile_options(eeg_occupancy PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math -lineinfo>
+)
+if(EEG_NOTCH_HZ)
+    target_compile_definitions(eeg_occupancy PRIVATE NOTCH_FREQ_HZ=${EEG_NOTCH_HZ})
+endif()

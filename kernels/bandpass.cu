@@ -15,42 +15,80 @@ template <> struct fir_t<BAND_BETA>      { static constexpr int N = NTAPS_BETA; 
 template <> struct fir_t<BAND_GAMMA>     { static constexpr int N = NTAPS_GAMMA;     __device__ static float at(int i) { return TAPS_GAMMA[i];     } };
 template <> struct fir_t<BAND_SSVEP>     { static constexpr int N = NTAPS_SSVEP;     __device__ static float at(int i) { return TAPS_SSVEP[i];     } };
 
-// Streaming FIR. smem holds (N-1) history samples followed by `win` new samples;
-// each thread emits one output. After compute, the last (N-1) input samples are
-// flushed back to global state for the next call (overlap-save).
+// =============================================================================
+// FIR streaming kernel — shared-memory tiling strategy
+// =============================================================================
+//
+// Block assignment: one block per channel. Each block computes the full WIN-sample
+// output for its channel and updates the per-channel history state.
+//
+// Tile contents (single shared-memory tile per block):
+//   [0 .. TILE_HISTORY)            — H = N-1 history samples from the previous call
+//   [TILE_HISTORY .. TILE_INPUT)   — WIN new input samples for this window
+//   [TILE_INPUT  .. TILE_INPUT + TILE_TAPS) — N filter coefficients
+//
+// Why this size:
+//   - WIN matches the pipeline window (a block produces exactly one window's output).
+//   - H = N-1 is the minimum history that lets every output in the window be a pure
+//     smem dot product — no global-memory re-reads inside the inner loop.
+//   - For NTAPS_BROADBAND = 257, smem footprint is (256+256+257)*4 ≈ 3 KB. sm_87 has
+//     164 KB smem/SM, so we are at <2% — larger tiles wouldn't buy us anything.
+//     Smaller tiles would force history re-reads at tile boundaries.
+//
+// Memory access pattern:
+//   Phase 1 (cooperative load): blockDim.x threads stride-load history+input, then
+//                                taps, into smem. Single __syncthreads.
+//   Phase 2 (compute): each thread does one length-N dot product over smem. Access
+//                      pattern is uniform across threads (no bank conflicts on sm_87).
+//   Phase 3 (history save): the last H input samples are written back to global state.
+//
+// Note on taps: keeping taps in __constant__ memory is *typically* equally fast
+// (constant-cache broadcast on warp-uniform k). Staging them into smem is done here
+// for explicitness and to give the SM-local scheduler a consistent operand source.
+// Performance delta vs constant-cache: noise. Worth measuring with NSight if you care.
+// =============================================================================
 template <Band B>
 __global__ void fir_streaming_kernel(const float* __restrict__ in,
                                      float*       __restrict__ out,
                                      float*       __restrict__ state,
                                      int win)
 {
-    constexpr int N = fir_t<B>::N;
-    constexpr int H = N - 1;
-    extern __shared__ float smem[];   // size: H + win
+    constexpr int N            = fir_t<B>::N;
+    constexpr int TILE_HISTORY = N - 1;
+    constexpr int TILE_TAPS    = N;
+    extern __shared__ float smem[];   // size: TILE_HISTORY + win + TILE_TAPS
 
     const int ch  = blockIdx.x;
     const int tid = threadIdx.x;
 
     const float* in_c    = in    + ch * win;
     float*       out_c   = out   + ch * win;
-    float*       state_c = state + ch * H;
+    float*       state_c = state + ch * TILE_HISTORY;
 
-    for (int j = tid; j < H + win; j += blockDim.x) {
-        smem[j] = (j < H) ? state_c[j] : in_c[j - H];
+    float* smem_samples = smem;                             // [TILE_HISTORY + win]
+    float* smem_taps    = smem + TILE_HISTORY + win;        // [TILE_TAPS]
+
+    // Phase 1: cooperative load of samples + taps.
+    for (int j = tid; j < TILE_HISTORY + win; j += blockDim.x) {
+        smem_samples[j] = (j < TILE_HISTORY) ? state_c[j] : in_c[j - TILE_HISTORY];
+    }
+    for (int k = tid; k < TILE_TAPS; k += blockDim.x) {
+        smem_taps[k] = fir_t<B>::at(k);
     }
     __syncthreads();
 
+    // Phase 2: each thread emits one output sample.
     float acc = 0.0f;
     #pragma unroll 16
     for (int k = 0; k < N; ++k) {
-        acc += fir_t<B>::at(k) * smem[H + tid - k];
+        acc += smem_taps[k] * smem_samples[TILE_HISTORY + tid - k];
     }
     out_c[tid] = acc;
 
     __syncthreads();
-    // Save tail of new input as next call's history.
-    for (int j = tid; j < H; j += blockDim.x) {
-        state_c[j] = smem[win + j];
+    // Phase 3: tail of new input becomes next call's history (overlap-save).
+    for (int j = tid; j < TILE_HISTORY; j += blockDim.x) {
+        state_c[j] = smem_samples[win + j];
     }
 }
 
@@ -80,7 +118,8 @@ void launch_fir_broadband(const float* in, float* out, float* state,
                           int n_ch, int win, cudaStream_t s)
 {
     constexpr int H = NTAPS_BROADBAND - 1;
-    size_t smem_bytes = (H + win) * sizeof(float);
+    constexpr int T = NTAPS_BROADBAND;
+    size_t smem_bytes = (H + win + T) * sizeof(float);
     fir_streaming_kernel<BAND_BROADBAND><<<n_ch, win, smem_bytes, s>>>(in, out, state, win);
 }
 

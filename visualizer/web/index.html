@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>cuda-eeg-prep — live</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; font: 14px/1.4 system-ui, -apple-system, sans-serif;
+    background: #0e1116; color: #d8dde6;
+    display: grid; grid-template-rows: auto 1fr; min-height: 100vh;
+  }
+  header {
+    padding: 14px 22px; border-bottom: 1px solid #1f2530;
+    display: flex; align-items: center; gap: 18px;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: .02em; }
+  header .grow { flex: 1; }
+  select, button {
+    background: #161b22; color: inherit; border: 1px solid #2a313d;
+    padding: 6px 10px; border-radius: 5px; font: inherit;
+  }
+  main {
+    display: grid; grid-template-columns: 2fr 1fr; gap: 12px; padding: 12px;
+    min-height: 0;
+  }
+  .panel {
+    background: #11151c; border: 1px solid #1f2530; border-radius: 8px;
+    padding: 12px; display: flex; flex-direction: column; min-height: 0;
+  }
+  .panel h2 { margin: 0 0 8px 0; font-size: 12px; font-weight: 500;
+              text-transform: uppercase; letter-spacing: .08em; color: #7c8696; }
+  .chart-wrap { flex: 1; min-height: 0; position: relative; }
+  #metrics {
+    position: fixed; top: 12px; right: 12px;
+    background: rgba(11, 14, 19, 0.92); backdrop-filter: blur(6px);
+    border: 1px solid #2a313d; border-radius: 8px;
+    padding: 10px 14px; font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 12px; min-width: 200px; z-index: 10;
+  }
+  #metrics .row { display: flex; justify-content: space-between; gap: 12px; }
+  #metrics .label { color: #7c8696; }
+  #metrics .value { color: #e8edf5; font-weight: 600; }
+  #status { font-size: 11px; color: #7c8696; }
+  .ok { color: #6dd07a; }
+  .warn { color: #d9a847; }
+</style>
+</head>
+<body>
+<header>
+  <h1>cuda-eeg-prep · live</h1>
+  <div class="grow"></div>
+  <label for="channels">channels:</label>
+  <select id="channels">
+    <option value="8" selected>8</option>
+    <option value="16">16</option>
+    <option value="32">32</option>
+  </select>
+  <span id="status">connecting…</span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Waveforms — raw (faded) + filtered (solid), first 8 ch</h2>
+    <div class="chart-wrap"><canvas id="wave"></canvas></div>
+  </section>
+  <section class="panel">
+    <h2>Band power (mean across channels)</h2>
+    <div class="chart-wrap"><canvas id="bands"></canvas></div>
+  </section>
+</main>
+
+<div id="metrics">
+  <div class="row"><span class="label">channels</span><span class="value" id="m-ch">–</span></div>
+  <div class="row"><span class="label">latency</span><span class="value" id="m-lat">–</span></div>
+  <div class="row"><span class="label">power</span><span class="value" id="m-pow">–</span></div>
+  <div class="row"><span class="label">ops/W</span><span class="value" id="m-opw">–</span></div>
+  <div class="row"><span class="label">avg ops/W</span><span class="value" id="m-aopw">–</span></div>
+  <div class="row"><span class="label">vs 8ch</span><span class="value" id="m-rel">–</span></div>
+</div>
+
+<script>
+const WIN = 256;
+const FS  = 250.0;
+const TIMEAXIS = Array.from({length: WIN}, (_, i) => (i / FS).toFixed(3));
+const COLORS = ['#7aa2f7','#9ece6a','#bb9af7','#f7768e','#e0af68','#7dcfff','#ff9e64','#73daca'];
+
+function makeWaveChart() {
+  const ds = [];
+  for (let c = 0; c < 8; c++) {
+    ds.push({ label: `ch${c} raw`, data: new Array(WIN).fill(0),
+              borderColor: COLORS[c]+'55', borderWidth: 1, pointRadius: 0, tension: 0 });
+    ds.push({ label: `ch${c} flt`, data: new Array(WIN).fill(0),
+              borderColor: COLORS[c],     borderWidth: 1.2, pointRadius: 0, tension: 0 });
+  }
+  return new Chart(document.getElementById('wave'), {
+    type: 'line',
+    data: { labels: TIMEAXIS, datasets: ds },
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#7c8696', maxTicksLimit: 6 }, grid: { color: '#1c2230' } },
+        y: { ticks: { color: '#7c8696' }, grid: { color: '#1c2230' } }
+      }
+    }
+  });
+}
+
+function makeBandChart() {
+  return new Chart(document.getElementById('bands'), {
+    type: 'bar',
+    data: {
+      labels: ['δ','θ','α','β','γ','SSVEP'],
+      datasets: [{ data: [0,0,0,0,0,0], backgroundColor: COLORS.slice(0,6) }]
+    },
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#7c8696' }, grid: { color: '#1c2230' } },
+        y: { type: 'logarithmic', ticks: { color: '#7c8696' }, grid: { color: '#1c2230' } }
+      }
+    }
+  });
+}
+
+const wave = makeWaveChart();
+const bands = makeBandChart();
+
+const status = document.getElementById('status');
+const fmt = (v, d=2) => v == null ? '–' : Number(v).toFixed(d);
+const fmtSci = v => v == null ? '–' : Number(v).toExponential(2);
+
+function applyFrame(f) {
+  const nShow = Math.min(8, f.raw.length);
+  for (let c = 0; c < 8; c++) {
+    if (c < nShow) {
+      wave.data.datasets[c*2].data     = f.raw[c];
+      wave.data.datasets[c*2 + 1].data = f.filtered[c];
+    } else {
+      wave.data.datasets[c*2].data     = new Array(WIN).fill(NaN);
+      wave.data.datasets[c*2 + 1].data = new Array(WIN).fill(NaN);
+    }
+  }
+  wave.update('none');
+
+  bands.data.datasets[0].data = f.bands;
+  bands.update('none');
+
+  const m = f.metrics;
+  document.getElementById('m-ch').textContent  = m.n_channels;
+  document.getElementById('m-lat').textContent = fmt(m.latency_ms) + ' ms';
+  document.getElementById('m-pow').textContent = m.power_w == null ? 'unavail' : fmt(m.power_w) + ' W';
+  document.getElementById('m-opw').textContent = fmtSci(m.ops_per_w);
+  document.getElementById('m-aopw').textContent = fmtSci(m.avg_ops_per_w);
+  document.getElementById('m-rel').textContent = m.rel_throughput == null ? '–' : fmt(m.rel_throughput) + 'x';
+}
+
+let ws;
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen    = () => { status.textContent = 'connected'; status.className = 'ok'; };
+  ws.onclose   = () => { status.textContent = 'disconnected — retrying'; status.className = 'warn'; setTimeout(connect, 1000); };
+  ws.onerror   = () => { /* handled by onclose */ };
+  ws.onmessage = ev => {
+    const f = JSON.parse(ev.data);
+    if (f.type === 'frame') applyFrame(f);
+  };
+}
+connect();
+
+document.getElementById('channels').addEventListener('change', e => {
+  const n = parseInt(e.target.value, 10);
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({type:'set_channels', n}));
+});
+</script>
+</body>
+</html>

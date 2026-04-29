@@ -39,40 +39,29 @@ static float* alloc_managed(size_t n) {
     return p;
 }
 
-extern "C" CudaEegPipeline* eeg_create(int n_ch, int win, float fs)
+// Allocate all per-channel buffers and build the cuFFT plan. Used by both eeg_create
+// (initial allocation, stream already created) and eeg_reconfigure (after teardown).
+static void alloc_per_channel(CudaEegPipeline* p)
 {
-    auto* p = new CudaEegPipeline{};
-    p->n_ch = n_ch;
-    p->win  = win;
-    p->fs   = fs;
-
-    CUDA_CHECK(cudaStreamCreate(&p->stream));
-
+    int n_ch = p->n_ch;
+    int win  = p->win;
     p->raw       = alloc_managed((size_t)n_ch * win);
     p->filtered  = alloc_managed((size_t)n_ch * win);
     p->features  = alloc_managed((size_t)n_ch * EEG_N_BANDS);
-
     p->state_fir = alloc_managed((size_t)n_ch * (eeg::NTAPS_BROADBAND - 1));
     p->z1        = alloc_managed(n_ch);
     p->z2        = alloc_managed(n_ch);
-
     p->fft_buf   = alloc_managed((size_t)n_ch * 3 * 128);
     p->spec_buf  = alloc_managed((size_t)n_ch * 3 * (128 / 2 + 1) * 2);
     p->psd_buf   = alloc_managed((size_t)n_ch * (128 / 2 + 1));
 
-    // cuFFT plan: 128-pt real-to-complex, batch = n_ch * NSEG
     cufftResult cr = cufftPlan1d(&p->plan, 128, CUFFT_R2C, n_ch * 3);
     if (cr != CUFFT_SUCCESS) { std::fprintf(stderr, "cufftPlan1d failed: %d\n", cr); std::abort(); }
     cufftSetStream(p->plan, p->stream);
-
-    eeg::psd_upload_constants(fs, p->stream);
-    CUDA_CHECK(cudaStreamSynchronize(p->stream));
-    return p;
 }
 
-extern "C" void eeg_destroy(CudaEegPipeline* p)
+static void free_per_channel(CudaEegPipeline* p)
 {
-    if (!p) return;
     cufftDestroy(p->plan);
     cudaFree(p->raw);
     cudaFree(p->filtered);
@@ -83,9 +72,44 @@ extern "C" void eeg_destroy(CudaEegPipeline* p)
     cudaFree(p->fft_buf);
     cudaFree(p->spec_buf);
     cudaFree(p->psd_buf);
+}
+
+extern "C" CudaEegPipeline* eeg_create(int n_ch, int win, float fs)
+{
+    auto* p = new CudaEegPipeline{};
+    p->n_ch = n_ch;
+    p->win  = win;
+    p->fs   = fs;
+
+    CUDA_CHECK(cudaStreamCreate(&p->stream));
+    alloc_per_channel(p);
+
+    eeg::psd_upload_constants(fs, p->stream);
+    CUDA_CHECK(cudaStreamSynchronize(p->stream));
+    return p;
+}
+
+extern "C" void eeg_destroy(CudaEegPipeline* p)
+{
+    if (!p) return;
+    free_per_channel(p);
     cudaStreamDestroy(p->stream);
     delete p;
 }
+
+extern "C" void eeg_reconfigure(CudaEegPipeline* p, int n_ch)
+{
+    if (!p || n_ch == p->n_ch) return;
+    CUDA_CHECK(cudaStreamSynchronize(p->stream));
+    free_per_channel(p);
+    p->n_ch = n_ch;
+    alloc_per_channel(p);
+    CUDA_CHECK(cudaStreamSynchronize(p->stream));
+}
+
+extern "C" const float* eeg_last_filtered(const CudaEegPipeline* p) { return p->filtered; }
+extern "C" int           eeg_n_ch(const CudaEegPipeline* p)         { return p->n_ch; }
+extern "C" int           eeg_win(const CudaEegPipeline* p)          { return p->win; }
 
 extern "C" void eeg_process_window(CudaEegPipeline* p, const float* raw_in, float* out)
 {

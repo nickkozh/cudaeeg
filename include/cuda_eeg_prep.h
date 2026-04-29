@@ -29,6 +29,16 @@ typedef struct CudaEegPipeline CudaEegPipeline;
 CudaEegPipeline* eeg_create(int n_ch, int win, float fs);
 void             eeg_destroy(CudaEegPipeline* p);
 
+// Tear down all per-channel buffers + cuFFT plan and rebuild for a new n_ch.
+// State (FIR ring, biquad) resets to zero. Brief stall — not for hot paths.
+void             eeg_reconfigure(CudaEegPipeline* p, int n_ch);
+
+// Read-only view of the post-CAR buffer for visualization. Returns p->filtered.
+// Valid until the next eeg_process_window() call. Layout: [n_ch * win] float32.
+const float*     eeg_last_filtered(const CudaEegPipeline* p);
+int              eeg_n_ch(const CudaEegPipeline* p);
+int              eeg_win(const CudaEegPipeline* p);
+
 // raw_in : n_ch * win float32 (channel-major: ch0[0..win), ch1[0..win), ...)
 // out    : n_ch * EEG_N_BANDS float32 — band powers per channel.
 void eeg_process_window(CudaEegPipeline* p, const float* raw_in, float* out);
